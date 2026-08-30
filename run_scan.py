@@ -91,13 +91,6 @@ def fetch_market_data(tickers):
         print(f"  yfinance batch download failed: {e}")
         return historicals, quotes
 
-    # Debug: show column structure on first run
-    if hasattr(raw.columns, 'levels'):
-        print(f"  [debug] MultiIndex levels: {raw.columns.levels}")
-        print(f"  [debug] First 4 columns: {list(raw.columns[:4])}")
-    else:
-        print(f"  [debug] Columns: {list(raw.columns[:4])}")
-
     for ticker in tickers:
         try:
             if len(tickers) > 1:
@@ -301,10 +294,6 @@ def evaluate_entries(payload, worker_url, worker_secret, sheet_url, sheet_secret
         if err:
             print(f"{ticker}: metrics error — {err}")
             continue
-
-        # One-time debug: show what keys calculate_indicators returned
-        if ticker == next(iter(payload.get('entry_tickers', ['NVDA'])), 'NVDA'):
-            print(f"  [debug] metrics keys for {ticker}: {list(metrics.keys()) if isinstance(metrics, dict) else type(metrics)}")
 
         etf_metrics, _ = compute_metrics(etf, payload)
         etf_return_10d  = etf_metrics.get('Return-10d-pct') if etf_metrics else None
