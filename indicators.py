@@ -96,14 +96,14 @@ def compute_daily_indicators(historicals_dict_list):
 
     dx = (100 * (plus_di14 - minus_di14).abs()
           / (plus_di14 + minus_di14).replace(0, np.nan)).fillna(0)
-    df['adx14'] = dx.ewm(alpha=1/14, adjust=False).mean()
+_adx14 = dx.ewm(alpha=1/14, adjust=False).mean()
 
     # ── TRIX-15 + Signal-9 ───────────────────────────────────────────────────
     ema1 = df['close_price'].ewm(span=15, adjust=False).mean()
     ema2 = ema1.ewm(span=15, adjust=False).mean()
     ema3 = ema2.ewm(span=15, adjust=False).mean()
-    df['trix15']       = ema3.pct_change() * 100         # rate of change of triple EWM
-    df['trix_signal9'] = df['trix15'].ewm(span=9, adjust=False).mean()
+_trix15 = ema3.pct_change() * 100         # rate of change of triple EWM
+_trix_signal9 = _trix15.ewm(span=9, adjust=False).mean()
 
     # ── Volume indicators ─────────────────────────────────────────────────────
     if has_volume:
@@ -133,9 +133,9 @@ def compute_daily_indicators(historicals_dict_list):
         "UpperBand":     _safe2(latest['upper_band']),
         "LowerBand":     _safe2(latest['lower_band']),
         "ATR-14":        _safe(latest['atr14']),
-        "ADX-14":        _safe2(latest['adx14']),
-        "TRIX-15":       _safe2(latest['trix15'], 4),
-        "TRIX-Signal-9": _safe2(latest['trix_signal9'], 4),
+        "ADX-14":        _safe2(_adx14.iloc[-1]),
+        "TRIX-15":       _safe2(_trix15.iloc[-1], 4),
+        "TRIX-Signal-9": _safe2(_trix_signal9.iloc[-1], 4),
         "20d-High":      _safe2(latest['high20']),
         "Return-10d-pct": round(return_10d, 2) if return_10d is not None else None,
         "Volume-20avg":  vol_avg20_val,
@@ -275,3 +275,4 @@ def adx_regime(adx_value):
         return "weak_trend"
     else:
         return "trending"
+
