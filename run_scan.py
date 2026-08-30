@@ -87,28 +87,33 @@ def fetch_market_data(tickers):
             auto_adjust=True,
             group_by='ticker',
         )
-        # Flatten MultiIndex columns that yfinance returns for multi-ticker downloads
-        if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = ['_'.join(str(c) for c in col).strip('_') for col in raw.columns]
     except Exception as e:
         print(f"  yfinance batch download failed: {e}")
         return historicals, quotes
 
+    # Debug: show column structure on first run
+    if hasattr(raw.columns, 'levels'):
+        print(f"  [debug] MultiIndex levels: {raw.columns.levels}")
+        print(f"  [debug] First 4 columns: {list(raw.columns[:4])}")
+    else:
+        print(f"  [debug] Columns: {list(raw.columns[:4])}")
+
     for ticker in tickers:
         try:
-            # Multi-ticker: columns are like 'Close_NVDA'; single: just 'Close'
             if len(tickers) > 1:
-                col_map = {
-                    'Close':  f'Close_{ticker}',
-                    'High':   f'High_{ticker}',
-                    'Low':    f'Low_{ticker}',
-                    'Volume': f'Volume_{ticker}',
-                }
-                if col_map['Close'] not in raw.columns:
-                    print(f"  {ticker}: no data in batch response")
+                if isinstance(raw.columns, pd.MultiIndex):
+                    # Try (field, ticker) order first (group_by='column' style)
+                    if ('Close', ticker) in raw.columns:
+                        df = raw.xs(ticker, axis=1, level=1)
+                    # Then try (ticker, field) order (group_by='ticker' style)
+                    elif (ticker, 'Close') in raw.columns:
+                        df = raw.xs(ticker, axis=1, level=0)
+                    else:
+                        print(f"  {ticker}: no data in batch response")
+                        continue
+                else:
+                    print(f"  {ticker}: unexpected column format")
                     continue
-                df = raw[[col_map['Close'], col_map['High'], col_map['Low'], col_map['Volume']]].copy()
-                df.columns = ['Close', 'High', 'Low', 'Volume']
             else:
                 df = raw.copy()
             df = df.dropna(subset=['Close'])
@@ -296,6 +301,10 @@ def evaluate_entries(payload, worker_url, worker_secret, sheet_url, sheet_secret
         if err:
             print(f"{ticker}: metrics error — {err}")
             continue
+
+        # One-time debug: show what keys calculate_indicators returned
+        if ticker == next(iter(payload.get('entry_tickers', ['NVDA'])), 'NVDA'):
+            print(f"  [debug] metrics keys for {ticker}: {list(metrics.keys()) if isinstance(metrics, dict) else type(metrics)}")
 
         etf_metrics, _ = compute_metrics(etf, payload)
         etf_return_10d  = etf_metrics.get('Return-10d-pct') if etf_metrics else None
