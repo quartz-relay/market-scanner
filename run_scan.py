@@ -1,7 +1,11 @@
 """
-run_scan.py  —  Trade signal engine. Accepts pre-fetched Robinhood data from
-Claude (the orchestrator), runs all calculations, posts to Slack, and logs to
-Google Sheets. Claude does NOT post signals or write logs — this script does.
+run_scan.py  —  Trade signal engine. Accepts account state from Claude
+(balance, positions, guardrail history), fetches market data via yfinance,
+runs all calculations, posts to Slack, and logs to Google Sheets.
+
+Claude fetches ONLY account-specific data from Robinhood (no historicals,
+no quotes). GitHub fetches all market data here at runtime — free, fast,
+no Claude tokens spent on price data.
 
 Usage:
     python run_scan.py --input payload.json
@@ -22,6 +26,7 @@ import argparse
 from datetime import datetime, timezone, timedelta
 
 import requests
+import yfinance as yf
 
 from indicators import (
     calculate_indicators,
@@ -58,6 +63,62 @@ def build_ticker_sector_map():
         sector = ETF_SECTOR_NAMES.get(etf, etf)
         result[ticker] = (sector, etf)
     return result
+
+
+def fetch_market_data(tickers):
+    """
+    Batch-fetches 1y of daily OHLCV + latest price for all tickers via yfinance.
+    Returns (historicals_dict, quotes_dict) in the same shape the rest of the
+    script expects — no Robinhood calls needed.
+    """
+    historicals = {}
+    quotes = {}
+    if not tickers:
+        return historicals, quotes
+
+    print(f"Fetching market data for {len(tickers)} tickers via yfinance...")
+    try:
+        raw = yf.download(
+            tickers=' '.join(tickers),
+            period='1y',
+            interval='1d',
+            progress=False,
+            auto_adjust=True,
+            group_by='ticker',
+        )
+    except Exception as e:
+        print(f"  yfinance batch download failed: {e}")
+        return historicals, quotes
+
+    for ticker in tickers:
+        try:
+            df = raw[ticker] if len(tickers) > 1 else raw
+            df = df.dropna(subset=['Close'])
+            if df.empty or len(df) < 20:
+                print(f"  {ticker}: insufficient yfinance data ({len(df)} bars)")
+                continue
+            historicals[ticker] = [
+                {
+                    'close_price': str(round(float(row['Close']), 4)),
+                    'high_price':  str(round(float(row['High']),  4)),
+                    'low_price':   str(round(float(row['Low']),   4)),
+                    'volume':      str(int(row['Volume'])) if 'Volume' in row and row['Volume'] == row['Volume'] else '0',
+                }
+                for _, row in df.iterrows()
+            ]
+            # Use fast_info for a fresher intraday price; fall back to last close
+            try:
+                live = yf.Ticker(ticker).fast_info.last_price
+                if not live or live != live:
+                    raise ValueError("no fast_info price")
+            except Exception:
+                live = float(df['Close'].iloc[-1])
+            quotes[ticker] = {'last_trade_price': str(round(live, 4))}
+        except Exception as e:
+            print(f"  {ticker}: yfinance parse error — {e}")
+
+    print(f"  Market data ready: {len(historicals)} tickers with historicals, {len(quotes)} with quotes")
+    return historicals, quotes
 
 
 def get_live_price(quotes, ticker):
@@ -524,17 +585,32 @@ def main():
     print("\n── EXIT EVALUATION (all open positions) ──")
     evaluate_exits(payload, worker_url, worker_secret, sheet_url, sheet_secret)
 
-    # Entry tickers: derive from TICKER_CONFIG env var (keeps watchlist out of Claude payload)
+    # Build ticker list from TICKER_CONFIG repo variable
     ticker_config = os.environ.get('TICKER_CONFIG', '')
     if ticker_config:
-        tickers = [pair.split(':')[0].strip().upper()
-                   for pair in ticker_config.split(',') if ':' in pair]
-        payload['entry_tickers'] = tickers
-        print(f"Tickers from TICKER_CONFIG: {len(tickers)}")
-    elif not payload.get('entry_tickers'):
-        print("Warning: TICKER_CONFIG not set and no entry_tickers in payload — skipping entry scan")
+        entry_tickers = [pair.split(':')[0].strip().upper()
+                         for pair in ticker_config.split(',') if ':' in pair]
+        etfs = list(dict.fromkeys(
+            pair.split(':')[1].strip().upper()
+            for pair in ticker_config.split(',') if ':' in pair
+        ))
+        payload['entry_tickers'] = entry_tickers
+        print(f"Tickers from TICKER_CONFIG: {len(entry_tickers)} stocks + {len(etfs)} ETFs")
+    else:
+        entry_tickers = payload.get('entry_tickers', [])
+        etfs = []
+        print("Warning: TICKER_CONFIG not set — using entry_tickers from payload")
 
-    print(f"\n── ENTRY SCAN (Run {run} tickers) ──")
+    # Add any open position tickers not already covered
+    open_tickers = [p['ticker'] for p in payload.get('open_positions', [])]
+    all_fetch = list(dict.fromkeys(entry_tickers + etfs + open_tickers))
+
+    # Fetch all market data via yfinance (no Robinhood historicals needed)
+    historicals, quotes = fetch_market_data(all_fetch)
+    payload['historicals'] = historicals
+    payload['quotes'] = quotes
+
+    print(f"\n── ENTRY SCAN (Run {run} — {len(entry_tickers)} tickers) ──")
     evaluate_entries(payload, worker_url, worker_secret, sheet_url, sheet_secret)
 
     print("\nScan complete.")
