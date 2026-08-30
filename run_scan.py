@@ -25,6 +25,7 @@ import json
 import argparse
 from datetime import datetime, timezone, timedelta
 
+import pandas as pd
 import requests
 import yfinance as yf
 
@@ -86,13 +87,30 @@ def fetch_market_data(tickers):
             auto_adjust=True,
             group_by='ticker',
         )
+        # Flatten MultiIndex columns that yfinance returns for multi-ticker downloads
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = ['_'.join(str(c) for c in col).strip('_') for col in raw.columns]
     except Exception as e:
         print(f"  yfinance batch download failed: {e}")
         return historicals, quotes
 
     for ticker in tickers:
         try:
-            df = raw[ticker] if len(tickers) > 1 else raw
+            # Multi-ticker: columns are like 'Close_NVDA'; single: just 'Close'
+            if len(tickers) > 1:
+                col_map = {
+                    'Close':  f'Close_{ticker}',
+                    'High':   f'High_{ticker}',
+                    'Low':    f'Low_{ticker}',
+                    'Volume': f'Volume_{ticker}',
+                }
+                if col_map['Close'] not in raw.columns:
+                    print(f"  {ticker}: no data in batch response")
+                    continue
+                df = raw[[col_map['Close'], col_map['High'], col_map['Low'], col_map['Volume']]].copy()
+                df.columns = ['Close', 'High', 'Low', 'Volume']
+            else:
+                df = raw.copy()
             df = df.dropna(subset=['Close'])
             if df.empty or len(df) < 20:
                 print(f"  {ticker}: insufficient yfinance data ({len(df)} bars)")
