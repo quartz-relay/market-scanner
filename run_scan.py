@@ -6,52 +6,13 @@ Google Sheets. Claude does NOT post signals or write logs — this script does.
 Usage:
     python run_scan.py --input payload.json
 
-Required env vars (same as before):
+Required env vars:
     WORKER_URL                  Cloudflare Worker base URL
     WORKER_SHARED_SECRET        Auth secret for Worker endpoints
     SHEET_LOG_WEBAPP_URL        Google Apps Script Web App URL
     SHEET_LOG_SHARED_SECRET     Auth secret for Sheet endpoint
-
-Input JSON schema (Claude builds this from Robinhood MCP calls):
-{
-  "run":             "A" | "B" | "C",
-  "entry_tickers":   ["NVDA", "TSM", ...],        # this run's 15 tickers
-  "portfolio_balance": 312.50,                     # get_portfolio total value
-  "available_cash":    45.00,                      # buying power
-  "open_positions": [
-    {
-      "ticker":             "NVDA",
-      "average_buy_price":  "118.40",
-      "strategy_type":      "MEAN_REVERSION",      # from Sheet lookup; default MEAN_REVERSION
-      "entry_timestamp":    "2026-08-28T14:00:00Z",
-      "dca_count":          0                      # DCA adds so far (0 = initial only)
-    }
-  ],
-  "historicals": {                                 # daily OHLC list keyed by ticker
-    "NVDA": [
-      {"close_price":"118.40","high_price":"120.10","low_price":"117.20"}, ...
-    ]
-  },
-  "quotes": {                                      # live quotes keyed by ticker
-    "NVDA": {"last_trade_price": "119.55"}
-  },
-  "today_date":               "2026-08-30",
-  "market_close_in_minutes":  240,                 # minutes until close; 9999 if unknown
-  "position_states": {                             # from Worker /position-state-check
-    "NVDA": {
-      "peak_price": 122.10,                        # momentum only
-      "breakdown": {"state":"NONE","last_updated_date":"2026-08-29"}
-    }
-  },
-  "open_position_counts": {
-    "mean_reversion": 2,
-    "momentum":       1,
-    "by_sector":      {"Semiconductors": 1}
-  },
-  "cooldown_history":   [{"ticker":"AMD","timestamp":"2026-08-29T10:00:00Z"}],
-  "frequency_history":  [{"ticker":"NVDA","timestamp":"2026-08-20T14:00:00Z"}],
-  "pnl_history":        [{"realized_pnl":-5.20,"is_last_24h":true}]
-}
+    TICKER_CONFIG               Comma-separated TICKER:ETF pairs (repo variable)
+                                e.g. NVDA:SMH,TSM:SMH,...,PM:XLP
 """
 
 import os
@@ -71,56 +32,33 @@ from indicators import (
     adx_regime,
 )
 
-TICKER_SECTOR_MAP = {
-    'NVDA':  ('Semiconductors',        'SMH'),
-    'TSM':   ('Semiconductors',        'SMH'),
-    'AVGO':  ('Semiconductors',        'SMH'),
-    'AMD':   ('Semiconductors',        'SMH'),
-    'MU':    ('Semiconductors',        'SMH'),
-    'LLY':   ('Healthcare',            'XLV'),
-    'JNJ':   ('Healthcare',            'XLV'),
-    'ABBV':  ('Healthcare',            'XLV'),
-    'UNH':   ('Healthcare',            'XLV'),
-    'MRK':   ('Healthcare',            'XLV'),
-    'BRK-B': ('Financials',            'XLF'),
-    'JPM':   ('Financials',            'XLF'),
-    'V':     ('Financials',            'XLF'),
-    'MA':    ('Financials',            'XLF'),
-    'BAC':   ('Financials',            'XLF'),
-    'AAPL':  ('Technology',            'XLK'),
-    'MSFT':  ('Technology',            'XLK'),
-    'ORCL':  ('Technology',            'XLK'),
-    'PLTR':  ('Technology',            'XLK'),
-    'CSCO':  ('Technology',            'XLK'),
-    'XOM':   ('Energy',                'XLE'),
-    'CVX':   ('Energy',                'XLE'),
-    'COP':   ('Energy',                'XLE'),
-    'MPC':   ('Energy',                'XLE'),
-    'PSX':   ('Energy',                'XLE'),
-    'NEE':   ('Utilities',             'XLU'),
-    'SO':    ('Utilities',             'XLU'),
-    'CEG':   ('Utilities',             'XLU'),
-    'DUK':   ('Utilities',             'XLU'),
-    'VST':   ('Utilities',             'XLU'),
-    'META':  ('Communication Services','XLC'),
-    'GOOGL': ('Communication Services','XLC'),
-    'NFLX':  ('Communication Services','XLC'),
-    'TMUS':  ('Communication Services','XLC'),
-    'T':     ('Communication Services','XLC'),
-    'AMZN':  ('Consumer Discretionary','XLY'),
-    'TSLA':  ('Consumer Discretionary','XLY'),
-    'HD':    ('Consumer Discretionary','XLY'),
-    'MCD':   ('Consumer Discretionary','XLY'),
-    'TJX':   ('Consumer Discretionary','XLY'),
-    'WMT':   ('Consumer Staples',      'XLP'),
-    'COST':  ('Consumer Staples',      'XLP'),
-    'PG':    ('Consumer Staples',      'XLP'),
-    'KO':    ('Consumer Staples',      'XLP'),
-    'PM':    ('Consumer Staples',      'XLP'),
+ETF_SECTOR_NAMES = {
+    'SMH': 'Semiconductors',
+    'XLV': 'Healthcare',
+    'XLF': 'Financials',
+    'XLK': 'Technology',
+    'XLE': 'Energy',
+    'XLU': 'Utilities',
+    'XLC': 'Communication Services',
+    'XLY': 'Consumer Discretionary',
+    'XLP': 'Consumer Staples',
 }
 
 
-# ── I/O helpers ──────────────────────────────────────────────────────────────
+def build_ticker_sector_map():
+    """Builds {TICKER: (SectorName, ETF)} from TICKER_CONFIG env var at runtime."""
+    config = os.environ.get('TICKER_CONFIG', '')
+    result = {}
+    for pair in config.split(','):
+        pair = pair.strip()
+        if ':' not in pair:
+            continue
+        ticker, etf = pair.split(':', 1)
+        ticker, etf = ticker.strip().upper(), etf.strip().upper()
+        sector = ETF_SECTOR_NAMES.get(etf, etf)
+        result[ticker] = (sector, etf)
+    return result
+
 
 def get_live_price(quotes, ticker):
     q = quotes.get(ticker, {})
@@ -203,7 +141,6 @@ def log_to_sheet(sheet_url, secret, record):
         if data.get("appended"):
             print(f"  -> Sheet: logged {record.get('recordType')} for {record.get('ticker')}")
         else:
-            # Non-JSON on redirect hop = echo-hop pattern; write likely succeeded
             print(f"  -> Sheet: confirmation unclear (echo-hop); write likely succeeded for {record.get('ticker')}")
     except Exception as e:
         print(f"  -> Sheet exception for {record.get('ticker')}: {e}")
@@ -219,8 +156,6 @@ def update_position_state(worker_url, secret, ticker, state):
     except Exception as e:
         print(f"  Warning: position-state-update failed for {ticker}: {e}")
 
-
-# ── Guardrail helpers ─────────────────────────────────────────────────────────
 
 def check_cooldown(ticker, cooldown_history):
     cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
@@ -251,9 +186,8 @@ def _parse_ts(ts_str):
         return datetime.min.replace(tzinfo=timezone.utc)
 
 
-# ── Entry evaluation ──────────────────────────────────────────────────────────
-
 def evaluate_entries(payload, worker_url, worker_secret, sheet_url, sheet_secret):
+    TICKER_SECTOR_MAP = build_ticker_sector_map()
     run        = payload['run']
     balance    = float(payload['portfolio_balance'])
     today      = payload['today_date']
@@ -300,14 +234,13 @@ def evaluate_entries(payload, worker_url, worker_secret, sheet_url, sheet_secret
               if stock_ret_10d is not None and etf_return_10d is not None
               else None)
 
-        # New indicators
-        rsi2          = metrics.get('RSI-2', rsi)
-        adx           = metrics.get('ADX-14', 0)
-        trix          = metrics.get('TRIX-15', 0)
-        trix_sig      = metrics.get('TRIX-Signal-9', 0)
-        vol_ratio     = metrics.get('Volume-ratio')   # None if volume not in historicals
-        regime        = adx_regime(adx)
-        score         = metrics.get('CompositeScore', 0)
+        rsi2      = metrics.get('RSI-2', rsi)
+        adx       = metrics.get('ADX-14', 0)
+        trix      = metrics.get('TRIX-15', 0)
+        trix_sig  = metrics.get('TRIX-Signal-9', 0)
+        vol_ratio = metrics.get('Volume-ratio')
+        regime    = adx_regime(adx)
+        score     = metrics.get('CompositeScore', 0)
 
         confirming_str = (f"RSI-14={rsi}, RSI-2={rsi2:.1f}, %B={pct_b:.2f}, "
                           f"ADX={adx:.1f}({regime}), TRIX={trix:.4f}, Score={score}")
@@ -315,95 +248,48 @@ def evaluate_entries(payload, worker_url, worker_secret, sheet_url, sheet_secret
         def _block(reason, signal_type):
             print(f"  {ticker} BLOCKED ({signal_type}): {reason}")
             log_to_sheet(sheet_url, sheet_secret, {
-                "timestamp":      datetime.now(timezone.utc).isoformat(),
-                "run":            run,
-                "recordType":     "BLOCKED",
-                "signalType":     signal_type,
-                "ticker":         ticker,
-                "sector":         sector,
-                "etfProxy":       etf,
-                "action":         "",
-                "price":          live,
-                "size":           "",
-                "signalReason":   "",
-                "positionCount":  "",
-                "exitReason":     "",
-                "confirmingData": confirming_str,
-                "costBasis":      "",
-                "realizedPnLDollar":  "",
-                "realizedPnLPercent": "",
-                "holdDuration":   "",
-                "blockReason":    reason,
+                "timestamp": datetime.now(timezone.utc).isoformat(), "run": run,
+                "recordType": "BLOCKED", "signalType": signal_type, "ticker": ticker,
+                "sector": sector, "etfProxy": etf, "action": "", "price": live,
+                "size": "", "signalReason": "", "positionCount": "", "exitReason": "",
+                "confirmingData": confirming_str, "costBasis": "",
+                "realizedPnLDollar": "", "realizedPnLPercent": "",
+                "holdDuration": "", "blockReason": reason,
             })
 
         def _fire_entry(signal_type, signal_reason, stop_loss, pending=False, pending_reason=""):
             label = "PENDING" if pending else "BUY"
-            print(f"  🔥 {ticker} {label} ({signal_type}): {signal_reason}")
-
+            print(f"  {ticker} {label} ({signal_type}): {signal_reason}")
             if pending:
                 log_to_sheet(sheet_url, sheet_secret, {
-                    "timestamp":      datetime.now(timezone.utc).isoformat(),
-                    "run":            run,
-                    "recordType":     "BLOCKED",
-                    "signalType":     signal_type,
-                    "ticker":         ticker,
-                    "sector":         sector,
-                    "etfProxy":       etf,
-                    "action":         "PENDING",
-                    "price":          live,
-                    "size":           position_size,
-                    "signalReason":   signal_reason,
-                    "positionCount":  "",
-                    "exitReason":     "",
-                    "confirmingData": confirming_str,
-                    "costBasis":      "",
-                    "realizedPnLDollar":  "",
-                    "realizedPnLPercent": "",
-                    "holdDuration":   "",
-                    "blockReason":    pending_reason,
+                    "timestamp": datetime.now(timezone.utc).isoformat(), "run": run,
+                    "recordType": "BLOCKED", "signalType": signal_type, "ticker": ticker,
+                    "sector": sector, "etfProxy": etf, "action": "PENDING", "price": live,
+                    "size": position_size, "signalReason": signal_reason, "positionCount": "",
+                    "exitReason": "", "confirmingData": confirming_str, "costBasis": "",
+                    "realizedPnLDollar": "", "realizedPnLPercent": "",
+                    "holdDuration": "", "blockReason": pending_reason,
                 })
                 return
-
             already = check_dedupe(worker_url, worker_secret, ticker, signal_type)
             if already:
                 print(f"  -> ALREADY REPORTED ({signal_type}); logging BLOCKED, skipping Slack")
                 _block(f"already reported (dedupe)", signal_type)
                 return
-
             log_to_sheet(sheet_url, sheet_secret, {
-                "timestamp":      datetime.now(timezone.utc).isoformat(),
-                "run":            run,
-                "recordType":     "ENTRY",
-                "signalType":     signal_type,
-                "ticker":         ticker,
-                "sector":         sector,
-                "etfProxy":       etf,
-                "action":         "INITIAL ENTRY",
-                "price":          live,
-                "size":           position_size,
-                "signalReason":   signal_reason,
-                "positionCount":  "1",
-                "exitReason":     "",
-                "confirmingData": confirming_str,
-                "costBasis":      "",
-                "realizedPnLDollar":  "",
-                "realizedPnLPercent": "",
-                "holdDuration":   "",
-                "blockReason":    "",
+                "timestamp": datetime.now(timezone.utc).isoformat(), "run": run,
+                "recordType": "ENTRY", "signalType": signal_type, "ticker": ticker,
+                "sector": sector, "etfProxy": etf, "action": "INITIAL ENTRY", "price": live,
+                "size": position_size, "signalReason": signal_reason, "positionCount": "1",
+                "exitReason": "", "confirmingData": confirming_str, "costBasis": "",
+                "realizedPnLDollar": "", "realizedPnLPercent": "", "holdDuration": "", "blockReason": "",
             })
-
-            post_to_slack(
-                worker_url, worker_secret,
-                ticker=ticker, action="BUY",
-                live_price=live, stop=stop_loss,
-                dollar_amount=position_size,
-                rs_value=rs,
-                notes=f"{signal_type} — {signal_reason}",
-            )
+            post_to_slack(worker_url, worker_secret, ticker=ticker, action="BUY",
+                          live_price=live, stop=stop_loss, dollar_amount=position_size,
+                          rs_value=rs, notes=f"{signal_type} — {signal_reason}")
             update_dedupe(worker_url, worker_secret, ticker, signal_type, today)
 
-        # ── MEAN REVERSION ────────────────────────────────────────────────────
-        # ADX regime: ranging (<20) favours MR; trending (>25) weakens MR thesis
+        # MEAN REVERSION
         mr_triggers = []
         if rsi < 40:
             mr_triggers.append(f"RSI-14={rsi:.1f}<40")
@@ -419,15 +305,12 @@ def evaluate_entries(payload, worker_url, worker_secret, sheet_url, sheet_secret
             trigger_str = "; ".join(mr_triggers)
             uptrend_a = live > sma20
             uptrend_b = etf_return_10d is not None and etf_return_10d > 0
-
             if not uptrend_a and not uptrend_b:
                 _block(f"no uptrend context (price vs SMA20={sma20:.2f}; ETF 10d={etf_return_10d})", "MEAN_REVERSION")
             elif rs is not None and rs < -6:
                 _block(f"RS={rs:.1f}% < -6% (RS filter)", "MEAN_REVERSION")
-            elif regime == "trending" and adx > 30:
-                # Strong trend (ADX>30) undercuts mean-reversion thesis — skip unless RSI-2 is extreme
-                if rsi2 >= 10:
-                    _block(f"ADX={adx:.1f} (strong trend) weakens MR thesis; RSI-2={rsi2:.1f} not extreme enough", "MEAN_REVERSION")
+            elif regime == "trending" and adx > 30 and rsi2 >= 10:
+                _block(f"ADX={adx:.1f} (strong trend) weakens MR thesis; RSI-2={rsi2:.1f} not extreme enough", "MEAN_REVERSION")
             elif score < -2:
                 _block(f"composite score={score} too weak for MR entry (min -2)", "MEAN_REVERSION")
             elif safety_mode:
@@ -454,28 +337,16 @@ def evaluate_entries(payload, worker_url, worker_secret, sheet_url, sheet_secret
         else:
             print(f"  {ticker}: no MR trigger (RSI={rsi:.1f}, %B={pct_b:.2f})")
             log_to_sheet(sheet_url, sheet_secret, {
-                "timestamp":      datetime.now(timezone.utc).isoformat(),
-                "run":            run,
-                "recordType":     "BLOCKED",
-                "signalType":     "MEAN_REVERSION",
-                "ticker":         ticker,
-                "sector":         sector,
-                "etfProxy":       etf,
-                "action":         "",
-                "price":          live,
-                "size":           "",
-                "signalReason":   "",
-                "positionCount":  "",
-                "exitReason":     "",
-                "confirmingData": confirming_str,
-                "costBasis":      "",
-                "realizedPnLDollar":  "",
-                "realizedPnLPercent": "",
-                "holdDuration":   "",
-                "blockReason":    f"no raw trigger (RSI={rsi:.1f}, %B={pct_b:.2f})",
+                "timestamp": datetime.now(timezone.utc).isoformat(), "run": run,
+                "recordType": "BLOCKED", "signalType": "MEAN_REVERSION", "ticker": ticker,
+                "sector": sector, "etfProxy": etf, "action": "", "price": live,
+                "size": "", "signalReason": "", "positionCount": "", "exitReason": "",
+                "confirmingData": confirming_str, "costBasis": "",
+                "realizedPnLDollar": "", "realizedPnLPercent": "", "holdDuration": "",
+                "blockReason": f"no raw trigger (RSI={rsi:.1f}, %B={pct_b:.2f})",
             })
 
-        # ── MOMENTUM ──────────────────────────────────────────────────────────
+        # MOMENTUM
         mo_triggers = []
         if rsi > 65:
             mo_triggers.append(f"RSI-14={rsi:.1f}>65")
@@ -489,10 +360,8 @@ def evaluate_entries(payload, worker_url, worker_secret, sheet_url, sheet_secret
             if live <= sma20 or live <= sma50:
                 _block(f"momentum context not confirmed (price {live:.2f} vs SMA20={sma20:.2f}, SMA50={sma50:.2f})", "MOMENTUM")
             elif trix <= 0 or trix <= trix_sig:
-                # TRIX must be positive AND above its signal line to confirm momentum
                 _block(f"TRIX not confirming momentum (TRIX={trix:.4f}, signal={trix_sig:.4f})", "MOMENTUM")
             elif is_new_20d and vol_ratio is not None and vol_ratio < 1.1:
-                # New 20d high on below-average volume = weak breakout
                 _block(f"new 20d high on low volume (vol ratio={vol_ratio:.2f} < 1.1)", "MOMENTUM")
             elif score < 2:
                 _block(f"composite score={score} too weak for momentum entry (min +2)", "MOMENTUM")
@@ -527,9 +396,8 @@ def evaluate_entries(payload, worker_url, worker_secret, sheet_url, sheet_secret
                     _fire_entry("MOMENTUM", reason, stop)
 
 
-# ── Exit evaluation ───────────────────────────────────────────────────────────
-
 def evaluate_exits(payload, worker_url, worker_secret, sheet_url, sheet_secret):
+    TICKER_SECTOR_MAP = build_ticker_sector_map()
     run             = payload['run']
     today           = payload['today_date']
     position_states = payload.get('position_states', {})
@@ -550,48 +418,33 @@ def evaluate_exits(payload, worker_url, worker_secret, sheet_url, sheet_secret):
 
         etf_metrics, _ = compute_metrics(etf, payload) if etf else (None, None)
 
-        live          = metrics['Live']
-        sma20         = metrics['SMA20']
-        atr           = metrics['ATR-14']
+        live           = metrics['Live']
+        sma20          = metrics['SMA20']
+        atr            = metrics['ATR-14']
         etf_return_10d = etf_metrics.get('Return-10d-pct') if etf_metrics else None
-        cached        = position_states.get(ticker, {})
-        new_state     = {}
+        cached         = position_states.get(ticker, {})
+        new_state      = {}
 
         confirming_str = f"ATR={atr:.4f}, SMA20={sma20:.2f}"
 
         def _fire_exit(exit_type, label, confirming, cost_basis=None, realized_pnl=None,
                        realized_pct=None, hold_duration=None):
-            print(f"  🚨 {ticker} {label} ({strategy})")
+            print(f"  {ticker} {label} ({strategy})")
             log_to_sheet(sheet_url, sheet_secret, {
-                "timestamp":      datetime.now(timezone.utc).isoformat(),
-                "run":            run,
-                "recordType":     "EXIT",
-                "signalType":     strategy,
-                "ticker":         ticker,
-                "sector":         sector,
-                "etfProxy":       etf,
-                "action":         "SELL",
-                "price":          live,
-                "size":           "",
-                "signalReason":   label,
-                "positionCount":  "",
-                "exitReason":     exit_type,
-                "confirmingData": confirming,
-                "costBasis":      cost_basis or "",
-                "realizedPnLDollar":  realized_pnl or "",
-                "realizedPnLPercent": realized_pct or "",
-                "holdDuration":   hold_duration or "",
-                "blockReason":    "",
+                "timestamp": datetime.now(timezone.utc).isoformat(), "run": run,
+                "recordType": "EXIT", "signalType": strategy, "ticker": ticker,
+                "sector": sector, "etfProxy": etf, "action": "SELL", "price": live,
+                "size": "", "signalReason": label, "positionCount": "",
+                "exitReason": exit_type, "confirmingData": confirming,
+                "costBasis": cost_basis or "", "realizedPnLDollar": realized_pnl or "",
+                "realizedPnLPercent": realized_pct or "", "holdDuration": hold_duration or "",
+                "blockReason": "",
             })
             already = check_dedupe(worker_url, worker_secret, ticker, f"exit-{exit_type}")
             if not already:
-                post_to_slack(
-                    worker_url, worker_secret,
-                    ticker=ticker, action="SELL",
-                    live_price=live, stop=None,
-                    dollar_amount=None, rs_value=None,
-                    notes=f"{label} | {confirming}",
-                )
+                post_to_slack(worker_url, worker_secret, ticker=ticker, action="SELL",
+                              live_price=live, stop=None, dollar_amount=None, rs_value=None,
+                              notes=f"{label} | {confirming}")
                 update_dedupe(worker_url, worker_secret, ticker, f"exit-{exit_type}", today)
             else:
                 print(f"  -> Exit for {ticker} already reported; skipping Slack re-post")
@@ -601,10 +454,9 @@ def evaluate_exits(payload, worker_url, worker_secret, sheet_url, sheet_secret):
             new_peak    = update_trailing_peak(cached_peak, live, entry_px)
             trail_stop  = round(new_peak - 1.75 * atr, 2)
             new_state['peak_price'] = new_peak
-
             if live <= trail_stop:
-                severe    = live <= (trail_stop - atr)
-                label     = 'EXIT SIGNAL (trailing-stop)' if severe else 'STOP WATCH (intraday)'
+                severe     = live <= (trail_stop - atr)
+                label      = 'EXIT SIGNAL (trailing-stop)' if severe else 'STOP WATCH (intraday)'
                 confirming = f"peak={new_peak:.2f}, trailing_stop={trail_stop:.2f}, ATR={atr:.4f}"
                 if severe:
                     _fire_exit('trailing-stop', label, confirming)
@@ -616,8 +468,8 @@ def evaluate_exits(payload, worker_url, worker_secret, sheet_url, sheet_secret):
         else:  # MEAN_REVERSION
             stop_level = round(entry_px - 1.75 * atr, 2)
             if live <= stop_level:
-                severe    = live <= (stop_level - atr)
-                label     = 'EXIT SIGNAL (stop-loss)' if severe else 'STOP WATCH (intraday)'
+                severe     = live <= (stop_level - atr)
+                label      = 'EXIT SIGNAL (stop-loss)' if severe else 'STOP WATCH (intraday)'
                 confirming = f"entry={entry_px:.2f}, stop={stop_level:.2f}, ATR={atr:.4f}"
                 if severe:
                     _fire_exit('stop-loss', label, confirming)
@@ -633,8 +485,7 @@ def evaluate_exits(payload, worker_url, worker_secret, sheet_url, sheet_secret):
             if is_exit:
                 confirming = (f"price<SMA20={sma20:.2f}: {price_below_sma20}; "
                               f"ETF 10d return={etf_return_10d}: {sector_neg}")
-                _fire_exit('trend-breakdown (2-close confirmed)',
-                           'EXIT SIGNAL (trend-breakdown)', confirming)
+                _fire_exit('trend-breakdown (2-close confirmed)', 'EXIT SIGNAL (trend-breakdown)', confirming)
             elif new_bd.get('state') == 'DAY1_PENDING':
                 print(f"  {ticker} TREND WATCH (day 1 of 2) — "
                       f"price<SMA20:{price_below_sma20}, sector neg:{sector_neg}")
@@ -644,8 +495,6 @@ def evaluate_exits(payload, worker_url, worker_secret, sheet_url, sheet_secret):
         if new_state:
             update_position_state(worker_url, worker_secret, ticker, new_state)
 
-
-# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser()
@@ -674,6 +523,16 @@ def main():
 
     print("\n── EXIT EVALUATION (all open positions) ──")
     evaluate_exits(payload, worker_url, worker_secret, sheet_url, sheet_secret)
+
+    # Entry tickers: derive from TICKER_CONFIG env var (keeps watchlist out of Claude payload)
+    ticker_config = os.environ.get('TICKER_CONFIG', '')
+    if ticker_config:
+        tickers = [pair.split(':')[0].strip().upper()
+                   for pair in ticker_config.split(',') if ':' in pair]
+        payload['entry_tickers'] = tickers
+        print(f"Tickers from TICKER_CONFIG: {len(tickers)}")
+    elif not payload.get('entry_tickers'):
+        print("Warning: TICKER_CONFIG not set and no entry_tickers in payload — skipping entry scan")
 
     print(f"\n── ENTRY SCAN (Run {run} tickers) ──")
     evaluate_entries(payload, worker_url, worker_secret, sheet_url, sheet_secret)
