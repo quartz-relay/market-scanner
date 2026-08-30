@@ -24,7 +24,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests pandas numpy
+        run: pip install requests pandas numpy yfinance
 
       - name: Decode payload
         run: |
