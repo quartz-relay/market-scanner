@@ -1,0 +1,52 @@
+name: Trade Scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      payload:
+        description: 'Base64-encoded JSON payload from Claude'
+        required: true
+        type: string
+      run_id:
+        description: 'Run identifier (A, B, or C)'
+        required: true
+        type: string
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      WORKER_URL: ${{ secrets.WORKER_URL }}
+      WORKER_SHARED_SECRET: ${{ secrets.WORKER_SHARED_SECRET }}
+      SHEET_LOG_WEBAPP_URL: ${{ secrets.SHEET_LOG_WEBAPP_URL }}
+      SHEET_LOG_SHARED_SECRET: ${{ secrets.SHEET_LOG_SHARED_SECRET }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests pandas numpy
+
+      - name: Decode payload and write to file
+        run: |
+          echo "${{ inputs.payload }}" | base64 --decode > /tmp/scan_payload.json
+          echo "Payload written. Run: ${{ inputs.run_id }}"
+
+      - name: Run trade scan
+        run: python run_scan.py --input /tmp/scan_payload.json
+
+      - name: Upload payload as artifact (for debugging)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-payload-run-${{ inputs.run_id }}
+          path: /tmp/scan_payload.json
+          retention-days: 3
