@@ -96,14 +96,14 @@ def compute_daily_indicators(historicals_dict_list):
 
     dx = (100 * (plus_di14 - minus_di14).abs()
           / (plus_di14 + minus_di14).replace(0, np.nan)).fillna(0)
-_adx14 = dx.ewm(alpha=1/14, adjust=False).mean()
+    _adx14 = dx.ewm(alpha=1/14, adjust=False).mean()
 
     # ── TRIX-15 + Signal-9 ───────────────────────────────────────────────────
     ema1 = df['close_price'].ewm(span=15, adjust=False).mean()
     ema2 = ema1.ewm(span=15, adjust=False).mean()
     ema3 = ema2.ewm(span=15, adjust=False).mean()
-_trix15 = ema3.pct_change() * 100         # rate of change of triple EWM
-_trix_signal9 = _trix15.ewm(span=9, adjust=False).mean()
+    _trix15 = ema3.pct_change() * 100         # rate of change of triple EWM
+    _trix_signal9 = _trix15.ewm(span=9, adjust=False).mean()
 
     # ── Volume indicators ─────────────────────────────────────────────────────
     if has_volume:
