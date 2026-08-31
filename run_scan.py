@@ -517,14 +517,11 @@ def evaluate_exits(payload, worker_url, worker_secret, sheet_url, sheet_secret):
                 "realizedPnLPercent": realized_pct or "", "holdDuration": hold_duration or "",
                 "blockReason": "",
             })
-            already = check_dedupe(worker_url, worker_secret, ticker, f"exit-{exit_type}")
-            if not already:
-                post_to_slack(worker_url, worker_secret, ticker=ticker, action="SELL",
-                              live_price=live, stop=None, dollar_amount=None, rs_value=None,
-                              notes=f"{label} | {confirming}")
-                update_dedupe(worker_url, worker_secret, ticker, f"exit-{exit_type}", today)
-            else:
-                print(f"  -> Exit for {ticker} already reported; skipping Slack re-post")
+            # Always post exit signals to Slack — position is still open so signal is still valid.
+            # Dedupe is intentionally skipped for exits.
+            post_to_slack(worker_url, worker_secret, ticker=ticker, action="SELL",
+                          live_price=live, stop=None, dollar_amount=None, rs_value=None,
+                          notes=f"{label} | {confirming}")
 
         if strategy == 'MOMENTUM':
             cached_peak = cached.get('peak_price')
