@@ -598,9 +598,6 @@ def main():
           f"Cash: ${payload.get('available_cash', 0):.2f}")
     print(f"{'='*60}")
 
-    print("\n── EXIT EVALUATION (all open positions) ──")
-    evaluate_exits(payload, worker_url, worker_secret, sheet_url, sheet_secret)
-
     # Build ticker list from TICKER_CONFIG repo variable
     ticker_config = os.environ.get('TICKER_CONFIG', '')
     if ticker_config:
@@ -625,6 +622,9 @@ def main():
     historicals, quotes = fetch_market_data(all_fetch)
     payload['historicals'] = historicals
     payload['quotes'] = quotes
+
+    print("\n── EXIT EVALUATION (all open positions) ──")
+    evaluate_exits(payload, worker_url, worker_secret, sheet_url, sheet_secret)
 
     print(f"\n── ENTRY SCAN (Run {run} — {len(entry_tickers)} tickers) ──")
     evaluate_entries(payload, worker_url, worker_secret, sheet_url, sheet_secret)
