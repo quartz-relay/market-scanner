@@ -573,6 +573,101 @@ def evaluate_exits(payload, worker_url, worker_secret, sheet_url, sheet_secret):
             update_position_state(worker_url, worker_secret, ticker, new_state)
 
 
+def normalize_payload(payload, worker_url, worker_secret):
+    """
+    Translate the simplified cloud-routine payload format into the shape
+    the rest of the script expects. The simplified format has:
+      run_id, account{buying_power, portfolio_value, cash}, positions[], open_orders[]
+    The legacy format (and what the script reads internally) has:
+      run, portfolio_balance, available_cash, open_positions[], position_states{}, etc.
+    """
+    if 'run' in payload:
+        return payload  # already in legacy format
+
+    run = payload.get('run_id', '?')
+    account = payload.get('account', {})
+    positions_raw = payload.get('positions', [])
+
+    # Fetch per-ticker position state from Worker to infer MOMENTUM vs MEAN_REVERSION
+    position_states = {}
+    if worker_url and worker_secret:
+        tickers = [p.get('symbol', p.get('ticker', '')) for p in positions_raw if p.get('symbol') or p.get('ticker')]
+        for ticker in tickers:
+            try:
+                res = requests.post(
+                    f"{worker_url.rstrip('/')}/position-state-check",
+                    json={"shared_secret": worker_secret, "ticker": ticker},
+                    timeout=5,
+                )
+                if res.status_code == 200:
+                    data = res.json()
+                    if data.get('found'):
+                        position_states[ticker] = data.get('state', {})
+            except Exception as e:
+                print(f"  Warning: could not fetch position state for {ticker}: {e}")
+
+    def infer_strategy(ticker):
+        state = position_states.get(ticker, {})
+        if 'peak_price' in state:
+            return 'MOMENTUM'
+        if 'breakdown' in state:
+            return 'MEAN_REVERSION'
+        return 'MEAN_REVERSION'
+
+    TICKER_SECTOR_MAP = build_ticker_sector_map()
+
+    open_positions = []
+    by_sector = {}
+    mr_count = 0
+    mo_count = 0
+    for p in positions_raw:
+        ticker = p.get('symbol', p.get('ticker', ''))
+        if not ticker:
+            continue
+        strategy = infer_strategy(ticker)
+        open_positions.append({
+            'ticker': ticker,
+            'average_buy_price': str(p.get('avg_cost', p.get('average_buy_price', 0))),
+            'strategy_type': strategy,
+            'entry_timestamp': '',
+            'dca_count': 0,
+        })
+        if strategy == 'MEAN_REVERSION':
+            mr_count += 1
+        else:
+            mo_count += 1
+        sector, _ = TICKER_SECTOR_MAP.get(ticker, (None, None))
+        if sector:
+            by_sector[sector] = by_sector.get(sector, 0) + 1
+
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    market_close_utc = datetime.now(timezone.utc).replace(
+        hour=20, minute=0, second=0, microsecond=0)
+    close_min = max(0, int((market_close_utc - datetime.now(timezone.utc)).total_seconds() / 60))
+
+    return {
+        'run': run,
+        'portfolio_balance': float(account.get('portfolio_value', 0)),
+        'available_cash': float(account.get('buying_power', account.get('cash', 0))),
+        'open_positions': open_positions,
+        'open_orders': payload.get('open_orders', []),
+        'historicals': payload.get('historicals', {}),
+        'quotes': payload.get('quotes', {}),
+        'entry_tickers': payload.get('entry_tickers', []),
+        'position_states': position_states,
+        'open_position_counts': {
+            'mean_reversion': mr_count,
+            'momentum': mo_count,
+            'by_sector': by_sector,
+        },
+        'cooldown_history': [],
+        'frequency_history': [],
+        'pnl_history': [],
+        'today_date': today,
+        'market_close_in_minutes': close_min,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--input', required=True, help='Path to JSON payload from Claude')
@@ -590,6 +685,8 @@ def main():
 
     with open(args.input, 'r') as f:
         payload = json.load(f)
+
+    payload = normalize_payload(payload, worker_url, worker_secret)
 
     run = payload.get('run', '?')
     print(f"\n{'='*60}")
