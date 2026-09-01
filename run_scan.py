@@ -519,8 +519,10 @@ def evaluate_exits(payload, worker_url, worker_secret, sheet_url, sheet_secret):
             })
             # Always post exit signals to Slack — position is still open so signal is still valid.
             # Dedupe is intentionally skipped for exits.
+            qty = float(pos.get('quantity', 0) or 0)
+            dollar_val = round(qty * live, 2) if qty and live else None
             post_to_slack(worker_url, worker_secret, ticker=ticker, action="SELL",
-                          live_price=live, stop=None, dollar_amount=None, rs_value=None,
+                          live_price=live, stop=None, dollar_amount=dollar_val, rs_value=None,
                           notes=f"{label} | {confirming}")
 
         if strategy == 'MOMENTUM':
@@ -625,6 +627,7 @@ def normalize_payload(payload, worker_url, worker_secret):
         open_positions.append({
             'ticker': ticker,
             'average_buy_price': str(p.get('avg_cost', p.get('average_buy_price', 0))),
+            'quantity': str(p.get('qty', p.get('quantity', 0))),
             'strategy_type': strategy,
             'entry_timestamp': '',
             'dca_count': 0,
