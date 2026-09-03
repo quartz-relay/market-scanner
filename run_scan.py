@@ -25,6 +25,8 @@ import json
 import argparse
 from datetime import datetime, timezone, timedelta
 
+import base64
+
 import pandas as pd
 import requests
 import yfinance as yf
@@ -684,7 +686,22 @@ def main():
         print("Warning: SHEET_LOG_WEBAPP_URL not set — Sheet logging will fail")
 
     with open(args.input, 'r') as f:
-        payload = json.load(f)
+        raw = f.read().strip()
+
+    enc_key = os.environ.get('PAYLOAD_ENCRYPTION_KEY', '')
+    if enc_key:
+        try:
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            key_bytes = bytes.fromhex(enc_key)
+            data = base64.urlsafe_b64decode(raw + '==')
+            iv, ct = data[:12], data[12:]
+            plaintext = AESGCM(key_bytes).decrypt(iv, ct, None).decode()
+            payload = json.loads(plaintext)
+        except Exception as e:
+            print(f"Decryption failed: {e} — attempting to parse as plain JSON")
+            payload = json.loads(raw)
+    else:
+        payload = json.loads(raw)
 
     payload = normalize_payload(payload, worker_url, worker_secret)
 
