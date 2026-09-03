@@ -52,6 +52,9 @@ ETF_SECTOR_NAMES = {
     'XLP': 'Consumer Staples',
 }
 
+# High-beta tickers get looser momentum entry thresholds to capture earlier moves.
+HIGH_BETA_TICKERS = {'TSLA', 'NVDA', 'AMD', 'MSTR', 'COIN', 'PLTR', 'SMCI'}
+
 
 def build_ticker_sector_map():
     """Builds {TICKER: (SectorName, ETF)} from TICKER_CONFIG env var at runtime."""
@@ -426,9 +429,15 @@ def evaluate_entries(payload, worker_url, worker_secret, sheet_url, sheet_secret
             })
 
         # MOMENTUM
+        is_high_beta = ticker in HIGH_BETA_TICKERS
+        rsi_mo_thresh    = 55  if is_high_beta else 65
+        rs_mo_thresh     = 6   if is_high_beta else 4
+        score_mo_thresh  = 1   if is_high_beta else 2
+        vol_mo_thresh    = 0.9 if is_high_beta else 1.1
+
         mo_triggers = []
-        if rsi > 65:
-            mo_triggers.append(f"RSI-14={rsi:.1f}>65")
+        if rsi > rsi_mo_thresh:
+            mo_triggers.append(f"RSI-14={rsi:.1f}>{rsi_mo_thresh}{'(high-beta)' if is_high_beta else ''}")
         if pct_b > 1.0:
             mo_triggers.append(f"%B={pct_b:.2f}>1.0")
         if is_new_20d:
@@ -438,16 +447,16 @@ def evaluate_entries(payload, worker_url, worker_secret, sheet_url, sheet_secret
             trigger_str = "; ".join(mo_triggers)
             if live <= sma20 or live <= sma50:
                 _block(f"momentum context not confirmed (price {live:.2f} vs SMA20={sma20:.2f}, SMA50={sma50:.2f})", "MOMENTUM")
-            elif trix <= 0 or trix <= trix_sig:
+            elif trix <= 0 or (not is_high_beta and trix <= trix_sig):
                 _block(f"TRIX not confirming momentum (TRIX={trix:.4f}, signal={trix_sig:.4f})", "MOMENTUM")
-            elif is_new_20d and vol_ratio is not None and vol_ratio < 1.1:
-                _block(f"new 20d high on low volume (vol ratio={vol_ratio:.2f} < 1.1)", "MOMENTUM")
-            elif score < 2:
-                _block(f"composite score={score} too weak for momentum entry (min +2)", "MOMENTUM")
+            elif is_new_20d and vol_ratio is not None and vol_ratio < vol_mo_thresh:
+                _block(f"new 20d high on low volume (vol ratio={vol_ratio:.2f} < {vol_mo_thresh})", "MOMENTUM")
+            elif score < score_mo_thresh:
+                _block(f"composite score={score} too weak for momentum entry (min +{score_mo_thresh})", "MOMENTUM")
             elif rs is None:
                 _block("RS unavailable — cannot verify sector confirmation", "MOMENTUM")
-            elif rs <= 4:
-                _block(f"RS={rs:.1f}% <= +4% (insufficient RS)", "MOMENTUM")
+            elif rs <= rs_mo_thresh:
+                _block(f"RS={rs:.1f}% <= +{rs_mo_thresh}% (insufficient RS)", "MOMENTUM")
             elif etf_return_10d is not None and etf_return_10d < 0 and rs <= 10:
                 _block(f"sector not participating (ETF 10d={etf_return_10d:.1f}%) and RS={rs:.1f}% not >+10%", "MOMENTUM")
             elif safety_mode:
@@ -466,7 +475,8 @@ def evaluate_entries(payload, worker_url, worker_secret, sheet_url, sheet_secret
                 waiver = ""
                 if etf_return_10d is not None and etf_return_10d < 0 and rs > 10:
                     waiver = " (sector-participation waived: RS>+10%)"
-                reason = f"{trigger_str}; RS={rs:.1f}%{waiver}"
+                hb_tag = " [HIGH-BETA early entry]" if is_high_beta else ""
+                reason = f"{trigger_str}; RS={rs:.1f}%{waiver}{hb_tag}"
                 stop   = round(live - 1.75 * atr, 2)
                 if close_min <= 120:
                     _fire_entry("MOMENTUM", reason, stop, pending=True,
