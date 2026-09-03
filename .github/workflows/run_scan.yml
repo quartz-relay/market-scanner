@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       payload:
-        description: 'Base64-encoded JSON payload from Claude'
+        description: 'Encrypted payload from Claude'
         required: true
         type: string
       run_id:
@@ -24,12 +24,10 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests pandas numpy yfinance
+        run: pip install requests pandas numpy yfinance cryptography
 
-      - name: Decode payload
-        run: |
-          echo "${{ inputs.payload }}" | base64 --decode > /tmp/scan_payload.json
-          echo "Payload written. Run: ${{ inputs.run_id }}"
+      - name: Write payload
+        run: printf '%s' "${{ inputs.payload }}" > /tmp/scan_payload.json
 
       - name: Run scan
         env:
@@ -37,6 +35,7 @@ jobs:
           WORKER_SHARED_SECRET: ${{ secrets.WORKER_SHARED_SECRET }}
           SHEET_LOG_WEBAPP_URL: ${{ secrets.SHEET_LOG_WEBAPP_URL }}
           SHEET_LOG_SHARED_SECRET: ${{ secrets.SHEET_LOG_SHARED_SECRET }}
+          PAYLOAD_ENCRYPTION_KEY: ${{ secrets.PAYLOAD_ENCRYPTION_KEY }}
           TICKER_CONFIG: ${{ vars.TICKER_CONFIG }}
         run: python run_scan.py --input /tmp/scan_payload.json
 
