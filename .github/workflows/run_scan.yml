@@ -46,3 +46,10 @@ jobs:
           name: failed-payload-${{ inputs.run_id }}-${{ github.run_id }}
           path: /tmp/scan_payload.json
           retention-days: 3
+
+      - name: Delete this run log
+        if: always()
+        run: |
+          curl -s -X DELETE \
+            -H "Authorization: token ${{ secrets.CLEANUP_PAT }}" \
+            "https://api.github.com/repos/quartz-relay/market-scanner/actions/runs/${{ github.run_id }}"
